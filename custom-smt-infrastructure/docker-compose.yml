@@ -1,0 +1,228 @@
+version: "2.2"
+
+services:
+
+  kafka-connect-smt-example_postgres:
+    image: postgres:latest
+    restart: always
+    container_name: kafka-connect-smt-example_postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=postgres
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/db.sql
+      - ./volumes/data/postgres-data:/var/lib/postgresql/data
+
+  kafka-connect-smt-example_cassandra:
+    image: cassandra:latest
+    container_name: kafka-connect-smt-example_cassandra
+    ports:
+      - "9042:9042"
+    environment:
+      - "MAX_HEAP_SIZE=256M"
+      - "HEAP_NEWSIZE=128M"
+      - "CASSANDRA_USER=root"
+      - "CASSANDRA_PASSWORD=root"
+    restart: always
+    volumes:
+      - ./volumes/data/cassandra_data:/var/lib/cassandra
+    healthcheck:
+      test: [ "CMD", "cqlsh", "-u root", "-p root" ,"-e describe keyspaces" ]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  kafka-connect-smt-example_cassandra_init:
+    container_name: kafka-connect-smt-example_cassandra_init
+    image: cassandra:latest
+    depends_on:
+      kafka-connect-smt-example_cassandra:
+        condition: service_healthy
+    volumes:
+      - ./init.cql:/init.cql
+    command: /bin/bash -c "echo loading kafka-connect-smt-example_cassandra keyspace && cqlsh kafka-connect-smt-example_cassandra -f ./init.cql"
+
+  kafka-connect-smt-example_zookeeper:
+    container_name: kafka-connect-smt-example_zookeeper
+    image: confluentinc/cp-zookeeper:7.5.3
+    ports:
+      - "2181:2181"
+    links:
+      - kafka-connect-smt-example_postgres
+      - kafka-connect-smt-example_cassandra
+      - kafka-connect-smt-example_cassandra_init
+    depends_on:
+      - kafka-connect-smt-example_postgres
+      - kafka-connect-smt-example_cassandra
+      - kafka-connect-smt-example_cassandra_init
+    hostname: kafka-connect-smt-example_zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      KAFKA_JMX_PORT: "9998"
+    volumes:
+      - ./volumes/kce/zookeeper/data:/var/lib/zookeeper/data
+      - ./volumes/kce/zookeeper/log:/var/lib/zookeeper/log
+
+  kafka-connect-smt-example_kafka:
+    container_name: kafka-connect-smt-example_kafka
+    image: confluentinc/cp-kafka:7.5.3
+    hostname: kafka-connect-smt-example_kafka
+    ports:
+      - "9092:29092"
+      - "9091:9091"
+      - "9997:9997"
+    links:
+      - kafka-connect-smt-example_postgres
+      - kafka-connect-smt-example_cassandra
+      - kafka-connect-smt-example_cassandra_init
+      - kafka-connect-smt-example_zookeeper
+    depends_on:
+      - kafka-connect-smt-example_postgres
+      - kafka-connect-smt-example_cassandra
+      - kafka-connect-smt-example_cassandra_init
+      - kafka-connect-smt-example_zookeeper
+    environment:
+      ADVERTISED_HOST_NAME: "kafka-connect-smt-example_kafka"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "EXTERNAL:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+      KAFKA_ADVERTISED_LISTENERS: "EXTERNAL://localhost:9091,PLAINTEXT://kafka-connect-smt-example_kafka:9092"
+      KAFKA_ZOOKEEPER_CONNECT: kafka-connect-smt-example_zookeeper:2181
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_JMX_PORT: "9997"
+      KAFKA_JMX_HOSTNAME: "kafka-connect-smt-example_kafka"
+      KAFKA_JMX_OPTS: "-Dcom.sun.management.jmxremote -Dcom.sun.management.jmxremote.authenticate=false -Dcom.sun.management.jmxremote.ssl=false -Djava.rmi.server.hostname=kafka-connect-smt-example_kafka -Dcom.sun.management.jmxremote.rmi.port=9997"
+    volumes:
+      - ./volumes/kce/broker/data:/var/lib/kafka/data
+
+  kafka-connect-smt-example_schema_registry:
+    container_name: kafka-connect-smt-example_schema_registry
+    image: confluentinc/cp-schema-registry:7.5.3
+    ports:
+      - "8081:8081"
+    links:
+      - kafka-connect-smt-example_postgres
+      - kafka-connect-smt-example_cassandra
+      - kafka-connect-smt-example_cassandra_init
+      - kafka-connect-smt-example_zookeeper
+      - kafka-connect-smt-example_kafka
+    depends_on:
+      - kafka-connect-smt-example_postgres
+      - kafka-connect-smt-example_cassandra
+      - kafka-connect-smt-example_cassandra_init
+      - kafka-connect-smt-example_zookeeper
+      - kafka-connect-smt-example_kafka
+    environment:
+      SCHEMA_REGISTRY_KAFKASTORE_CONNECTION_URL: "kafka-connect-smt-example_zookeeper:2181"
+      SCHEMA_REGISTRY_HOST_NAME: "kafka-connect-smt-example_schema_registry"
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: "kafka-connect-smt-example_kafka:9092"
+      SCHEMA_REGISTRY_LISTENERS: "http://0.0.0.0:8081"
+      SCHEMA_REGISTRY_DEBUG: "true"
+
+  kafka-connect-smt-example_kafka_connect:
+    build: ./
+    container_name: kafka-connect-smt-example_kafka_connect
+    image: confluentinc/cp-kafka-connect_with_plugin:7.5.3
+    ports:
+      - "8083:8083"
+    links:
+      - kafka-connect-smt-example_postgres
+      - kafka-connect-smt-example_cassandra
+      - kafka-connect-smt-example_cassandra_init
+      - kafka-connect-smt-example_zookeeper
+      - kafka-connect-smt-example_kafka
+      - kafka-connect-smt-example_schema_registry
+    depends_on:
+      - kafka-connect-smt-example_postgres
+      - kafka-connect-smt-example_cassandra
+      - kafka-connect-smt-example_cassandra_init
+      - kafka-connect-smt-example_zookeeper
+      - kafka-connect-smt-example_kafka
+      - kafka-connect-smt-example_schema_registry
+    environment:
+      # networking
+      CONNECT_BOOTSTRAP_SERVERS: "kafka-connect-smt-example_kafka:9092"
+      CONNECT_REST_ADVERTISED_HOST_NAME: "kafka-connect-smt-example_kafka_connect"
+      CONNECT_REST_PORT: "8083"
+      # kafka
+      CONNECT_GROUP_ID: "kc"
+      CONNECT_CONFIG_STORAGE_TOPIC: "kc-config"
+      CONNECT_OFFSET_STORAGE_TOPIC: "kc-offset"
+      CONNECT_STATUS_STORAGE_TOPIC: "kc-status"
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: "1"
+      # convertors
+      CONNECT_KEY_CONVERTER: "org.apache.kafka.connect.storage.StringConverter"
+      CONNECT_VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: "http://kafka-connect-smt-example_schema_registry:8081"
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: "http://kafka-connect-smt-example_schema_registry:8081"
+      CONNECT_INTERNAL_KEY_CONVERTER: "org.apache.kafka.connect.storage.StringConverter"
+      CONNECT_INTERNAL_VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      CONNECT_PLUGIN_PATH: "/usr/share/confluent-hub-components,/etc/kafka-connect/jars"
+        #      /usr/share/confluent-hub-components <- path to plugin from DOCKER FILE
+      #      /etc/kafka-connect/jars <- path to plugin from volume
+    volumes:
+      - ./vol-kafka-connect-jar:/etc/kafka-connect/jars
+      - ./vol-kafka-connect-smt-jar:/usr/share/confluent-hub-components/custom_smt
+      - ./volumes/kce/kafka/data:/tmp/data
+
+  kafka-connect-smt-example_kafka_rest:
+    image: confluentinc/cp-kafka-rest:7.5.3
+    hostname: kafka-connect-smt-example_kafka_rest
+    container_name: kafka-connect-smt-example_kafka_rest
+    links:
+      - kafka-connect-smt-example_postgres
+      - kafka-connect-smt-example_cassandra
+      - kafka-connect-smt-example_cassandra_init
+      - kafka-connect-smt-example_zookeeper
+      - kafka-connect-smt-example_kafka
+      - kafka-connect-smt-example_schema_registry
+    depends_on:
+      - kafka-connect-smt-example_postgres
+      - kafka-connect-smt-example_cassandra
+      - kafka-connect-smt-example_cassandra_init
+      - kafka-connect-smt-example_zookeeper
+      - kafka-connect-smt-example_kafka
+      - kafka-connect-smt-example_schema_registry
+    ports:
+      - 8082:8082
+    environment:
+      KAFKA_REST_HOST_NAME: kafka-connect-smt-example_kafka_rest
+      KAFKA_REST_BOOTSTRAP_SERVERS: "kafka-connect-smt-example_kafka:9092"
+      KAFKA_REST_ZOOKEEPER_CONNECT: "kafka-connect-smt-example_zookeeper:2181"
+      KAFKA_REST_LISTENERS: "http://0.0.0.0:8082"
+      KAFKA_REST_SCHEMA_REGISTRY_URL: "http://kafka-connect-smt-example_schema_registry:8081"
+
+  kafka-connect-smt-example_kafka_ui:
+    container_name: kafka-connect-smt-example_kafka_ui
+    image: provectuslabs/kafka-ui:latest
+    ports:
+      - 8080:8080
+    links:
+      - kafka-connect-smt-example_postgres
+      - kafka-connect-smt-example_cassandra
+      - kafka-connect-smt-example_cassandra_init
+      - kafka-connect-smt-example_zookeeper
+      - kafka-connect-smt-example_kafka
+      - kafka-connect-smt-example_schema_registry
+      - kafka-connect-smt-example_kafka_rest
+    depends_on:
+      - kafka-connect-smt-example_postgres
+      - kafka-connect-smt-example_cassandra
+      - kafka-connect-smt-example_cassandra_init
+      - kafka-connect-smt-example_zookeeper
+      - kafka-connect-smt-example_kafka
+      - kafka-connect-smt-example_schema_registry
+      - kafka-connect-smt-example_kafka_rest
+    environment:
+      KAFKA_CLUSTERS_0_NAME: "local"
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: "kafka-connect-smt-example_kafka:9092"
+      KAFKA_CLUSTERS_0_METRICS_PORT: "9997"
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: "http://kafka-connect-smt-example_schema_registry:8081"
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: "first"
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: "http://kafka-connect-smt-example_kafka_connect:8083"
+      DYNAMIC_CONFIG_ENABLED: "false"
+
